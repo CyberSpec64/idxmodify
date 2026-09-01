@@ -1,0 +1,1390 @@
+#!/bin/sh
+#==============================================================================
+# idxmodify - Main Command Interface
+# Firmware modification and disk manipulation OS
+#==============================================================================
+
+VERSION="1.0.0"
+NAME="idxmodify"
+
+# Colors
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+MAGENTA='\033[0;35m'
+WHITE='\033[1;37m'
+NC='\033[0m'
+
+# Global flags
+DRY_RUN=0
+VERBOSE=0
+FORCE=0
+SAFE_MODE=0
+
+#══════════════════════════════════════════════════════════════════════════════
+# Utility functions
+#══════════════════════════════════════════════════════════════════════════════
+
+log_info()    { echo -e "${GREEN}[INFO]${NC} $*"; }
+log_warn()    { echo -e "${YELLOW}[WARN]${NC} $*"; }
+log_error()   { echo -e "${RED}[ERROR]${NC} $*"; }
+log_step()    { echo -e "${BLUE}[STEP]${NC} $*"; }
+
+confirm() {
+    local msg="$1"
+    if [  ${FORCE:-0} -eq 1  ]; then
+        return 0
+    fi
+    echo -e "${YELLOW}${msg} (y/N):${NC} "
+    read -r response
+    case "$response" in
+        [yY][eE][sS]|[yY]) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+check_device() {
+    local dev="$1"
+    if [  ! -b "$dev"  ]; then
+        log_error "Device $dev does not exist"
+        return 1
+    fi
+    return 0
+}
+
+#══════════════════════════════════════════════════════════════════════════════
+# Banner
+#══════════════════════════════════════════════════════════════════════════════
+
+show_banner() {
+    echo -e "${CYAN}"
+    cat << 'BANNER'
+    ╔════════════════════════════════════════════════════════════╗
+    ║                                                            ║
+    ║    ██╗██████╗ ████████╗                                   ║
+    ║    ██║██╔══██╗╚══██╔══╝                                   ║
+    ║    ██║██████╔╝   ██║                                       ║
+    ║    ██║██╔══██╗   ██║                                       ║
+    ║    ██║██║  ██║   ██║                                       ║
+    ║    ╚═╝╚═╝  ╚═╝   ╚═╝                                     ║
+    ║                                                            ║
+    ║    idxmodify - Firmware & Disk Manipulation OS            ║
+    ║    Version: 1.0.0                                         ║
+    ╚════════════════════════════════════════════════════════════╝
+BANNER
+    echo -e "${NC}"
+}
+
+#══════════════════════════════════════════════════════════════════════════════
+# Firmware Tools
+#══════════════════════════════════════════════════════════════════════════════
+
+cmd_firmware() {
+    local subcmd="${1:-help}"
+    shift 2>/dev/null || true
+    
+    case "$subcmd" in
+        extract)
+            firmware_extract "$@"
+            ;;
+        flash)
+            firmware_flash "$@"
+            ;;
+        verify)
+            firmware_verify "$@"
+            ;;
+        info)
+            firmware_info "$@"
+            ;;
+        backup)
+            firmware_backup "$@"
+            ;;
+        *)
+            firmware_help
+            ;;
+    esac
+}
+
+firmware_help() {
+    cat << EOF
+Firmware Management Commands:
+
+Usage: idxm firmware <command> [options]
+
+Commands:
+    extract <device> [output]      Extract firmware from device
+    flash <device> <firmware>      Flash firmware to device
+    verify <device> <firmware>     Verify firmware integrity
+    info <device>                  Show firmware information
+    backup <device> [output]       Backup current firmware
+
+Options:
+    -f, --force                   Force operation (skip confirmations)
+    -n, --dry-run                 Show what would be done
+    -v, --verbose                 Verbose output
+    -s, --safe                    Safe mode (read-only)
+
+Examples:
+    idxm firmware extract /dev/sda bios.bin
+    idxm firmware flash /dev/sda modified_bios.bin
+    idxm firmware backup /dev/sda backup.bin
+
+EOF
+}
+
+firmware_extract() {
+    local device="$1"
+    local output="${2:-firmware_dump.bin}"
+    
+    if [  -z "$device"  ]; then
+        log_error "Device required"
+        echo "Usage: idxm firmware extract <device> [output]"
+        return 1
+    fi
+    
+    check_device "$device" || return 1
+    
+    log_step "Extracting firmware from $device..."
+    
+    if [  ${DRY_RUN:-0} -eq 1  ]; then
+        log_info "[DRY RUN] Would extract firmware from $device to $output"
+        return 0
+    fi
+    
+    if [  ${SAFE_MODE:-0} -eq 1  ]; then
+        log_warn "Safe mode: Cannot extract firmware (destructive operation)"
+        return 1
+    fi
+    
+    # Try flashrom first
+    if command -v flashrom >/dev/null 2>&1; then
+        flashrom -p internal -r "$output" -V
+    else
+        # Fallback to dd for raw extraction
+        log_warn "flashrom not available, using dd for raw extraction"
+        dd if="$device" of="$output" bs=1M status=progress
+    fi
+    
+    if [  $? -eq 0  ]; then
+        log_info "Firmware extracted to: $output"
+        log_info "MD5: $(md5sum "$output" | cut -d' ' -f1)"
+        log_info "SHA256: $(sha256sum "$output" | cut -d' ' -f1)"
+    else
+        log_error "Firmware extraction failed"
+        return 1
+    fi
+}
+
+firmware_flash() {
+    local device="$1"
+    local firmware="$2"
+    
+    if [  -z "$device"  ] || [  -z "$firmware"  ]; then
+        log_error "Device and firmware file required"
+        echo "Usage: idxm firmware flash <device> <firmware>"
+        return 1
+    fi
+    
+    check_device "$device" || return 1
+    
+    if [  ! -f "$firmware"  ]; then
+        log_error "Firmware file not found: $firmware"
+        return 1
+    fi
+    
+    if [  ${SAFE_MODE:-0} -eq 1  ]; then
+        log_error "Safe mode: Cannot flash firmware (destructive operation)"
+        return 1
+    fi
+    
+    log_step "Flashing firmware to $device..."
+    log_warn "This will overwrite the current firmware!"
+    log_info "Firmware file: $firmware"
+    log_info "MD5: $(md5sum "$firmware" | cut -d' ' -f1)"
+    log_info "SHA256: $(sha256sum "$firmware" | cut -d' ' -f1)"
+    
+    if ! confirm "Are you sure you want to flash this firmware?"; then
+        log_info "Aborted"
+        return 0
+    fi
+    
+    if [  ${DRY_RUN:-0} -eq 1  ]; then
+        log_info "[DRY RUN] Would flash $firmware to $device"
+        return 0
+    fi
+    
+    # Backup first
+    local backup="firmware_backup_$(date +%Y%m%d_%H%M%S).bin"
+    log_step "Creating backup..."
+    firmware_backup "$device" "$backup"
+    
+    # Flash with flashrom
+    if command -v flashrom >/dev/null 2>&1; then
+        flashrom -p internal -w "$firmware" -V
+    else
+        log_warn "flashrom not available, using dd"
+        dd if="$firmware" of="$device" bs=1M status=progress
+    fi
+    
+    if [  $? -eq 0  ]; then
+        log_info "Firmware flashed successfully"
+    else
+        log_error "Firmware flash failed!"
+        log_info "Backup saved as: $backup"
+        return 1
+    fi
+}
+
+firmware_verify() {
+    local device="$1"
+    local firmware="$2"
+    
+    if [  -z "$device"  ] || [  -z "$firmware"  ]; then
+        log_error "Device and firmware file required"
+        echo "Usage: idxm firmware verify <device> <firmware>"
+        return 1
+    fi
+    
+    check_device "$device" || return 1
+    
+    if [  ! -f "$firmware"  ]; then
+        log_error "Firmware file not found: $firmware"
+        return 1
+    fi
+    
+    log_step "Verifying firmware integrity..."
+    
+    # Extract current firmware
+    local current_fw="/tmp/current_fw_verify.bin"
+    firmware_extract "$device" "$current_fw"
+    
+    # Compare
+    local fw_md5=$(md5sum "$firmware" | cut -d' ' -f1)
+    local cur_md5=$(md5sum "$current_fw" | cut -d' ' -f1)
+    
+    if [  "$fw_md5" == "$cur_md5"  ]; then
+        log_info "Firmware files match (MD5: $fw_md5)"
+    else
+        log_warn "Firmware files differ"
+        log_info "File MD5: $fw_md5"
+        log_info "Device MD5: $cur_md5"
+    fi
+    
+    rm -f "$current_fw"
+}
+
+firmware_info() {
+    local device="$1"
+    
+    if [  -z "$device"  ]; then
+        log_error "Device required"
+        echo "Usage: idxm firmware info <device>"
+        return 1
+    fi
+    
+    check_device "$device" || return 1
+    
+    echo -e "\n${CYAN}Firmware Information for ${device}${NC}"
+    echo "─────────────────────────────────────"
+    
+    # Device info
+    lsblk "$device" 2>/dev/null || fdisk -l "$device" 2>/dev/null
+    
+    # Try to read firmware
+    if command -v flashrom >/dev/null 2>&1; then
+        echo -e "\n${CYAN}Flashrom Info:${NC}"
+        flashrom -p internal -V 2>/dev/null || true
+    fi
+    
+    # SMBIOS/DMI
+    if [  -d /sys/firmware/dmi  ]; then
+        echo -e "\n${CYAN}System Info:${NC}"
+        cat /sys/firmware/dmi/tables/smbios_entry_point 2>/dev/null || true
+    fi
+}
+
+firmware_backup() {
+    local device="$1"
+    local output="${2:-firmware_backup_$(date +%Y%m%d_%H%M%S).bin}"
+    
+    if [  -z "$device"  ]; then
+        log_error "Device required"
+        return 1
+    fi
+    
+    check_device "$device" || return 1
+    
+    log_step "Backing up firmware from $device..."
+    
+    if command -v flashrom >/dev/null 2>&1; then
+        flashrom -p internal -r "$output" -V
+    else
+        dd if="$device" of="$output" bs=1M status=progress
+    fi
+    
+    log_info "Firmware backup saved to: $output"
+}
+
+#══════════════════════════════════════════════════════════════════════════════
+# Disk Tools
+#══════════════════════════════════════════════════════════════════════════════
+
+cmd_disk() {
+    local subcmd="${1:-help}"
+    shift 2>/dev/null || true
+    
+    case "$subcmd" in
+        list)
+            disk_list "$@"
+            ;;
+        info)
+            disk_info "$@"
+            ;;
+        partition)
+            disk_partition "$@"
+            ;;
+        format)
+            disk_format "$@"
+            ;;
+        clone)
+            disk_clone "$@"
+            ;;
+        wipe)
+            disk_wipe "$@"
+            ;;
+        resize)
+            disk_resize "$@"
+            ;;
+        *)
+            disk_help
+            ;;
+    esac
+}
+
+disk_help() {
+    cat << EOF
+Disk Management Commands:
+
+Usage: idxm disk <command> [options]
+
+Commands:
+    list                        List all disks
+    info <device>               Show disk information
+    partition <device>          Interactive partitioning
+    format <device> <type>      Format disk (ext4, fat32, ntfs, etc.)
+    clone <src> <dst>           Clone disk (forensic copy)
+    wipe <device>               Securely wipe disk
+    resize <device> <part>      Resize partition
+
+Options:
+    -f, --force                 Force operation
+    -n, --dry-run               Show what would be done
+    -v, --verbose               Verbose output
+    -s, --safe                  Safe mode (read-only)
+
+Examples:
+    idxm disk list
+    idxm disk info /dev/sda
+    idxm disk clone /dev/sda /dev/sdb
+    idxm disk wipe /dev/sdb
+
+EOF
+}
+
+disk_list() {
+    echo -e "\n${CYAN}Available Disks:${NC}"
+    echo "───────────────────────────────────────────────────────────────"
+    
+    if command -v lsblk >/dev/null 2>&1; then
+        lsblk -f -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINT,MODEL
+    elif command -v fdisk >/dev/null 2>&1; then
+        fdisk -l 2>/dev/null
+    else
+        ls /dev/sd* /dev/nvme* 2>/dev/null
+    fi
+    
+    echo ""
+}
+
+disk_info() {
+    local device="$1"
+    
+    if [  -z "$device"  ]; then
+        log_error "Device required"
+        echo "Usage: idxm disk info <device>"
+        return 1
+    fi
+    
+    check_device "$device" || return 1
+    
+    echo -e "\n${CYAN}Disk Information: ${device}${NC}"
+    echo "═══════════════════════════════════════════════════════════════"
+    
+    # Basic info
+    echo -e "\n${WHITE}Basic Information:${NC}"
+    lsblk "$device" 2>/dev/null
+    
+    # Partition table
+    echo -e "\n${WHITE}Partition Table:${NC}"
+    fdisk -l "$device" 2>/dev/null || parted -l "$device" 2>/dev/null
+    
+    # Filesystem info
+    echo -e "\n${WHITE}Filesystem Info:${NC}"
+    blkid "$device" 2>/dev/null || true
+    
+    # SMART info (if available)
+    if command -v smartctl >/dev/null 2>&1; then
+        echo -e "\n${WHITE}SMART Info:${NC}"
+        smartctl -a "$device" 2>/dev/null || true
+    fi
+    
+    # Hardware info
+    echo -e "\n${WHITE}Hardware Info:${NC}"
+    cat /sys/block/$(basename "$device")/device/model 2>/dev/null || true
+    cat /sys/block/$(basename "$device")/queue/logical_block_size 2>/dev/null || true
+}
+
+disk_partition() {
+    local device="$1"
+    
+    if [  -z "$device"  ]; then
+        log_error "Device required"
+        echo "Usage: idxm disk partition <device>"
+        return 1
+    fi
+    
+    check_device "$device" || return 1
+    
+    if [  ${SAFE_MODE:-0} -eq 1  ]; then
+        log_error "Safe mode: Cannot partition disk (destructive operation)"
+        return 1
+    fi
+    
+    log_step "Starting interactive partitioning for $device..."
+    
+    # Show current partitions
+    fdisk -l "$device" 2>/dev/null
+    
+    echo -e "\n${YELLOW}Select partitioning tool:${NC}"
+    echo "1) fdisk (MBR)"
+    echo "2) gdisk (GPT)"
+    echo "3) parted"
+    echo "4) cfdisk (interactive)"
+    echo "5) Cancel"
+    
+    read -p "Choice [1-5]: " choice
+    
+    case "$choice" in
+        1) fdisk "$device" ;;
+        2) gdisk "$device" ;;
+        3) parted "$device" ;;
+        4) cfdisk "$device" ;;
+        *) log_info "Cancelled"; return 0 ;;
+    esac
+}
+
+disk_format() {
+    local device="$1"
+    local fstype="${2:-ext4}"
+    local label="${3:-}"
+    
+    if [  -z "$device"  ]; then
+        log_error "Device required"
+        echo "Usage: idxm disk format <device> [fstype] [label]"
+        return 1
+    fi
+    
+    check_device "$device" || return 1
+    
+    if [  ${SAFE_MODE:-0} -eq 1  ]; then
+        log_error "Safe mode: Cannot format disk (destructive operation)"
+        return 1
+    fi
+    
+    log_warn "This will ERASE ALL DATA on $device!"
+    
+    if ! confirm "Are you sure?"; then
+        log_info "Aborted"
+        return 0
+    fi
+    
+    log_step "Formatting $device as $fstype..."
+    
+    local mkfs_cmd=""
+    case "$fstype" in
+        ext4)
+            if command -v mkfs.ext4 >/dev/null 2>&1; then mkfs_cmd="mkfs.ext4"
+            elif command -v mke2fs >/dev/null 2>&1; then
+                log_warn "This environment's mke2fs only supports ext2; formatting as ext2"
+                mkfs_cmd="mke2fs"
+            else log_error "No ext formatter available"; return 1; fi
+            ;;
+        ext3)
+            if command -v mkfs.ext3 >/dev/null 2>&1; then mkfs_cmd="mkfs.ext3"
+            elif command -v mke2fs >/dev/null 2>&1; then
+                log_warn "This environment's mke2fs only supports ext2; formatting as ext2"
+                mkfs_cmd="mke2fs"
+            else log_error "No ext formatter available"; return 1; fi
+            ;;
+        ext2)
+            if command -v mkfs.ext2 >/dev/null 2>&1; then mkfs_cmd="mkfs.ext2"
+            elif command -v mke2fs >/dev/null 2>&1; then mkfs_cmd="mke2fs"
+            else log_error "No ext2 formatter available"; return 1; fi
+            ;;
+        fat32|vfat)
+            if command -v mkfs.vfat >/dev/null 2>&1; then mkfs_cmd="mkfs.vfat -F 32"
+            elif command -v mkdosfs >/dev/null 2>&1; then mkfs_cmd="mkdosfs -F 32"
+            else log_error "No vfat formatter available"; return 1; fi
+            ;;
+        fat16)
+            if command -v mkfs.vfat >/dev/null 2>&1; then mkfs_cmd="mkfs.vfat -F 16"
+            elif command -v mkdosfs >/dev/null 2>&1; then mkfs_cmd="mkdosfs -F 16"
+            else log_error "No vfat formatter available"; return 1; fi
+            ;;
+        ntfs)   mkfs_cmd="mkfs.ntfs -f" ;;
+        btrfs)  mkfs_cmd="mkfs.btrfs -f" ;;
+        xfs)    mkfs_cmd="mkfs.xfs -f" ;;
+        *)
+            log_error "Unsupported filesystem: $fstype"
+            return 1
+            ;;
+    esac
+    
+    if [  ${DRY_RUN:-0} -eq 1  ]; then
+        log_info "[DRY RUN] Would format $device as $fstype"
+        return 0
+    fi
+    
+    if [  -n "$label"  ]; then
+        $mkfs_cmd -L "$label" "$device"
+    else
+        $mkfs_cmd "$device"
+    fi
+    
+    if [  $? -eq 0  ]; then
+        log_info "Format complete"
+    else
+        log_error "Format failed"
+        return 1
+    fi
+}
+
+disk_clone() {
+    local src="$1"
+    local dst="$2"
+    
+    if [  -z "$src"  ] || [  -z "$dst"  ]; then
+        log_error "Source and destination devices required"
+        echo "Usage: idxm disk clone <source> <destination>"
+        return 1
+    fi
+    
+    check_device "$src" || return 1
+    check_device "$dst" || return 1
+    
+    if [  ${SAFE_MODE:-0} -eq 1  ]; then
+        log_error "Safe mode: Cannot clone disk (destructive operation)"
+        return 1
+    fi
+    
+    log_warn "This will OVERWRITE ALL DATA on $dst!"
+    log_info "Source: $src"
+    log_info "Destination: $dst"
+    
+    if ! confirm "Are you sure?"; then
+        log_info "Aborted"
+        return 0
+    fi
+    
+    log_step "Cloning $src to $dst..."
+    
+    if [  ${DRY_RUN:-0} -eq 1  ]; then
+        log_info "[DRY RUN] Would clone $src to $dst"
+        return 0
+    fi
+    
+    # Use ddrescue if available for better error handling
+    if command -v ddrescue >/dev/null 2>&1; then
+        ddrescue -f -v "$src" "$dst"
+    else
+        dd if="$src" of="$dst" bs=4M status=progress conv=sync,noerror
+    fi
+    
+    if [  $? -eq 0  ]; then
+        log_info "Clone complete"
+        
+        # Verify
+        log_step "Verifying clone..."
+        local src_md5=$(dd if="$src" bs=1M 2>/dev/null | md5sum | cut -d' ' -f1)
+        local dst_md5=$(dd if="$dst" bs=1M 2>/dev/null | md5sum | cut -d' ' -f1)
+        
+        if [  "$src_md5" == "$dst_md5"  ]; then
+            log_info "Verification passed (MD5: $src_md5)"
+        else
+            log_warn "Verification failed - MD5 mismatch!"
+        fi
+    else
+        log_error "Clone failed"
+        return 1
+    fi
+}
+
+disk_wipe() {
+    local device="$1"
+    local passes="${2:-1}"
+    
+    if [  -z "$device"  ]; then
+        log_error "Device required"
+        echo "Usage: idxm disk wipe <device> [passes]"
+        return 1
+    fi
+    
+    check_device "$device" || return 1
+    
+    if [  ${SAFE_MODE:-0} -eq 1  ]; then
+        log_error "Safe mode: Cannot wipe disk (destructive operation)"
+        return 1
+    fi
+    
+    log_error "WARNING: This will DESTROY ALL DATA on $device!"
+    log_error "This operation CANNOT be undone!"
+    
+    if ! confirm "Type 'yes' to confirm you want to wipe $device"; then
+        log_info "Aborted"
+        return 0
+    fi
+    
+    log_step "Wiping $device ($passes pass(es))..."
+    
+    if [  ${DRY_RUN:-0} -eq 1  ]; then
+        log_info "[DRY RUN] Would wipe $device with $passes passes"
+        return 0
+    fi
+    
+    if command -v shred >/dev/null 2>&1; then
+        shred -vzn "$passes" "$device"
+    else
+        # Fallback to dd
+        i=1
+        while [ "$i" -le "$passes" ]; do
+            log_step "Pass $i of $passes..."
+            dd if=/dev/zero of="$device" bs=1M status=progress
+            if [ "$i" -lt "$passes" ]; then
+                dd if=/dev/urandom of="$device" bs=1M status=progress
+            fi
+            i=$((i+1))
+        done
+    fi
+    
+    log_info "Wipe complete"
+}
+
+#══════════════════════════════════════════════════════════════════════════════
+# OS Modification Tools
+#══════════════════════════════════════════════════════════════════════════════
+
+cmd_os() {
+    local subcmd="${1:-help}"
+    shift 2>/dev/null || true
+    
+    case "$subcmd" in
+        mount)
+            os_mount "$@"
+            ;;
+        unmount)
+            os_unmount "$@"
+            ;;
+        chroot)
+            os_chroot "$@"
+            ;;
+        list)
+            os_list "$@"
+            ;;
+        modify)
+            os_modify "$@"
+            ;;
+        customize)
+            os_customize "$@"
+            ;;
+        install)
+            os_install "$@"
+            ;;
+        grub)
+            os_grub "$@"
+            ;;
+        *)
+            os_help
+            ;;
+    esac
+}
+
+os_help() {
+    cat << EOF
+OS Modification Commands:
+
+Usage: idxm os <command> [options]
+
+Commands:
+    mount <device> <mountpoint>     Mount OS partition
+    unmount <mountpoint>            Unmount OS partition
+    chroot <device>                 Chroot into OS
+    list                            List mounted OS partitions
+    modify <device> <action>        Modify OS (fix-boot, fix-grub, etc.)
+    customize <device>              Interactive OS customization
+    install <device> <distro>       Install Linux distro
+    grub <device> <action>          GRUB management
+
+Options:
+    -f, --force                     Force operation
+    -n, --dry-run                   Show what would be done
+    -v, --verbose                   Verbose output
+    -s, --safe                      Safe mode (read-only)
+
+Examples:
+    idxm os mount /dev/sda1 /mnt
+    idxm os chroot /dev/sda2
+    idxm os modify /dev/sda1 fix-grub
+    idxm os customize /dev/sda2
+
+EOF
+}
+
+os_mount() {
+    local device="$1"
+    local mountpoint="${2:-/mnt/os}"
+    
+    if [  -z "$device"  ]; then
+        log_error "Device required"
+        echo "Usage: idxm os mount <device> [mountpoint]"
+        return 1
+    fi
+    
+    check_device "$device" || return 1
+    
+    # Create mountpoint if it doesn't exist
+    mkdir -p "$mountpoint"
+    
+    log_step "Mounting $device at $mountpoint..."
+    
+    # Detect filesystem
+    local fstype=$(blkid -o value -s TYPE "$device" 2>/dev/null)
+    
+    if [  -n "$fstype"  ]; then
+        mount -t "$fstype" "$device" "$mountpoint"
+    else
+        mount "$device" "$mountpoint"
+    fi
+    
+    if [  $? -eq 0  ]; then
+        log_info "Mounted $device at $mountpoint"
+        
+        # Show mounted info
+        echo -e "\n${CYAN}Mounted filesystem:${NC}"
+        df -h "$mountpoint"
+        
+        # Show OS info if Linux
+        if [  -d "$mountpoint/etc"  ]; then
+            echo -e "\n${CYAN}OS Information:${NC}"
+            cat "$mountpoint/etc/os-release" 2>/dev/null || true
+            cat "$mountpoint/etc/lsb-release" 2>/dev/null || true
+        fi
+    else
+        log_error "Failed to mount $device"
+        return 1
+    fi
+}
+
+os_unmount() {
+    local mountpoint="${1:-/mnt/os}"
+    
+    log_step "Unmounting $mountpoint..."
+    umount "$mountpoint"
+    
+    if [  $? -eq 0  ]; then
+        log_info "Unmounted $mountpoint"
+    else
+        log_error "Failed to unmount $mountpoint"
+        return 1
+    fi
+}
+
+os_chroot() {
+    local device="$1"
+    local mountpoint="/tmp/os_chroot"
+    
+    if [  -z "$device"  ]; then
+        log_error "Device required"
+        echo "Usage: idxm os chroot <device>"
+        return 1
+    fi
+    
+    check_device "$device" || return 1
+    
+    log_step "Preparing chroot environment..."
+    
+    # Mount the device
+    mkdir -p "$mountpoint"
+    os_mount "$device" "$mountpoint"
+    
+    # Mount necessary virtual filesystems
+    mount --bind /dev "$mountpoint/dev" 2>/dev/null || true
+    mount --bind /dev/pts "$mountpoint/dev/pts" 2>/dev/null || true
+    mount -t proc none "$mountpoint/proc" 2>/dev/null || true
+    mount -t sysfs none "$mountpoint/sys" 2>/dev/null || true
+    
+    # Copy resolv.conf
+    cp /etc/resolv.conf "$mountpoint/etc/resolv.conf" 2>/dev/null || true
+    
+    log_step "Entering chroot..."
+    echo -e "${CYAN}You are now in chroot. Type 'exit' to leave.${NC}"
+    
+    chroot "$mountpoint" /bin/bash
+    
+    # Cleanup
+    log_step "Cleaning up chroot..."
+    umount "$mountpoint/dev/pts" 2>/dev/null || true
+    umount "$mountpoint/dev" 2>/dev/null || true
+    umount "$mountpoint/proc" 2>/dev/null || true
+    umount "$mountpoint/sys" 2>/dev/null || true
+    os_unmount "$mountpoint"
+}
+
+os_list() {
+    echo -e "\n${CYAN}Mounted OS Partitions:${NC}"
+    echo "───────────────────────────────────────────────────────────────"
+    
+    mount | grep -E "^/dev/sd|^/dev/nvme" | while read -r line; do
+        echo "$line"
+    done
+    
+    echo -e "\n${CYAN}All Mounts:${NC}"
+    echo "───────────────────────────────────────────────────────────────"
+    df -hT | grep -v tmpfs
+}
+
+os_modify() {
+    local device="$1"
+    local action="$2"
+    
+    if [  -z "$device"  ] || [  -z "$action"  ]; then
+        log_error "Device and action required"
+        echo "Usage: idxm os modify <device> <action>"
+        echo ""
+        echo "Actions:"
+        echo "  fix-boot    - Fix boot issues"
+        echo "  fix-grub    - Fix GRUB bootloader"
+        echo "  reset-pass  - Reset user password"
+        echo "  enable-root - Enable root account"
+        echo ""
+        return 1
+    fi
+    
+    local mountpoint="/tmp/os_modify"
+    
+    case "$action" in
+        fix-boot)
+            log_step "Fixing boot for $device..."
+            os_chroot "$device" << 'CHROOT_EOF'
+                apt-get update 2>/dev/null || yum update 2>/dev/null || true
+                apt-get install --reinstall grub-pc 2>/dev/null || \
+                yum reinstall grub2 2>/dev/null || true
+                update-grub 2>/dev/null || grub2-mkconfig -o /boot/grub/grub.cfg 2>/dev/null
+CHROOT_EOF
+            ;;
+        fix-grub)
+            log_step "Fixing GRUB on $device..."
+            local root_part=$(lsblk -ln -o MOUNTPOINT "$device" | head -1)
+            if [  -n "$root_part"  ]; then
+                grub-install --root-directory="$root_part" "$device"
+                update-grub
+            fi
+            ;;
+        reset-pass)
+            log_step "Resetting password..."
+            os_chroot "$device" << 'CHROOT_EOF'
+                echo "Set new root password:"
+                passwd root
+CHROOT_EOF
+            ;;
+        enable-root)
+            log_step "Enabling root account..."
+            os_chroot "$device" << 'CHROOT_EOF'
+                passwd -u root
+                sed -i 's/^#*PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config
+CHROOT_EOF
+            ;;
+        *)
+            log_error "Unknown action: $action"
+            return 1
+            ;;
+    esac
+}
+
+os_customize() {
+    local device="$1"
+    local mountpoint="/tmp/os_customize"
+    
+    if [  -z "$device"  ]; then
+        log_error "Device required"
+        echo "Usage: idxm os customize <device>"
+        return 1
+    fi
+    
+    log_step "Starting interactive OS customization..."
+    
+    while true; do
+        echo -e "\n${CYAN}═══════════════════════════════════════════════════════════════${NC}"
+        echo -e "${CYAN}  idxmodify - OS Customization Menu${NC}"
+        echo -e "${CYAN}═══════════════════════════════════════════════════════════════${NC}"
+        echo ""
+        echo "  1) View OS Information"
+        echo "  2) Manage Users"
+        echo "  3) Install Packages"
+        echo "  4) Configure Services"
+        echo "  5) Edit Configuration Files"
+        echo "  6) Modify Initramfs"
+        echo "  7) Fix Boot/GRUB"
+        echo "  8) Open Shell (chroot)"
+        echo "  9) Return to Main Menu"
+        echo ""
+        read -p "  Select option [1-9]: " choice
+        
+        case "$choice" in
+            1)
+                os_mount "$device" "$mountpoint"
+                cat "$mountpoint/etc/os-release" 2>/dev/null || true
+                os_unmount "$mountpoint"
+                ;;
+            2)
+                os_chroot "$device" << 'CHROOT_EOF'
+                    echo "Available users:"
+                    cat /etc/passwd | cut -d: -f1
+                    echo ""
+                    echo "1) Add user"
+                    echo "2) Delete user"
+                    echo "3) Change password"
+                    echo "4) Cancel"
+                    read -p "Choice: " user_choice
+                    case "$user_choice" in
+                        1) adduser ;;
+                        2) deluser ;;
+                        3) passwd ;;
+                        *) ;;
+                    esac
+CHROOT_EOF
+                ;;
+            3)
+                os_chroot "$device" << 'CHROOT_EOF'
+                    echo "Package manager detected:"
+                    if command -v apt-get >/dev/null 2>&1; then
+                        apt-get update
+                        apt-get install
+                    elif command -v yum >/dev/null 2>&1; then
+                        yum install
+                    elif command -v pacman >/dev/null 2>&1; then
+                        pacman -S
+                    fi
+CHROOT_EOF
+                ;;
+            4)
+                os_chroot "$device" << 'CHROOT_EOF'
+                    systemctl list-unit-files 2>/dev/null || \
+                    ls /etc/init.d/ 2>/dev/null || \
+                    ls /etc/rc.d/ 2>/dev/null
+CHROOT_EOF
+                ;;
+            5)
+                os_chroot "$device" /bin/bash
+                ;;
+            6)
+                log_step "Modifying initramfs..."
+                os_mount "$device" "$mountpoint"
+                
+                if [  -d "$mountpoint/boot"  ]; then
+                    cd "$mountpoint/boot"
+                    if [  -f initrd.img  ]; then
+                        local initrd_dir="/tmp/initrd_extract"
+                        mkdir -p "$initrd_dir"
+                        cd "$initrd_dir"
+                        unmkinitramfs "$mountpoint/boot/initrd.img" .
+                        log_info "Initramfs extracted to $initrd_dir"
+                        log_info "Make your changes, then rebuild with:"
+                        echo "  mkinitramfs -o $mountpoint/boot/initrd.img $(uname -r)"
+                    fi
+                fi
+                
+                os_unmount "$mountpoint"
+                ;;
+            7)
+                os_modify "$device" "fix-grub"
+                ;;
+            8)
+                os_chroot "$device"
+                ;;
+            9)
+                break
+                ;;
+            *)
+                log_error "Invalid option"
+                ;;
+        esac
+    done
+}
+
+os_install() {
+    local device="$1"
+    local distro="$2"
+    
+    if [  -z "$device"  ] || [  -z "$distro"  ]; then
+        log_error "Device and distribution required"
+        echo "Usage: idxm os install <device> <distribution>"
+        echo ""
+        echo "Available distributions:"
+        echo "  debian    - Debian GNU/Linux"
+        echo "  ubuntu    - Ubuntu Linux"
+        echo "  arch      - Arch Linux"
+        echo "  fedora    - Fedora Linux"
+        echo "  void      - Void Linux"
+        echo "  alpine    - Alpine Linux"
+        echo ""
+        return 1
+    fi
+    
+    log_step "Installing $distro to $device..."
+    
+    local mountpoint="/tmp/os_install"
+    mkdir -p "$mountpoint"
+    
+    case "$distro" in
+        debian|ubuntu)
+            if command -v debootstrap >/dev/null 2>&1; then
+                debootstrap --arch=amd64 "$distro" "$mountpoint"
+            else
+                log_error "debootstrap not found. Install with: apt-get install debootstrap"
+                return 1
+            fi
+            ;;
+        arch)
+            # Arch bootstrap
+            wget -q -O /tmp/archlinux-bootstrap.tar.gz \
+                "https://mirror.rackspace.com/archlinux/iso/latest/archlinux-bootstrap-x86_64.tar.gz"
+            tar -xzf /tmp/archlinux-bootstrap.tar.gz -C "$mountpoint" --strip-components=1
+            ;;
+        fedora)
+            # Use dnf --installroot
+            dnf --installroot="$mountpoint" -y install @core
+            ;;
+        void)
+            # Void Linux XBPS
+            wget -q -O /tmp/void-x86_64-musl.tar.xz \
+                "https://alpha.de.repo.voidlinux.org/live/current/void-x86_64-musl.tar.xz"
+            tar -xf /tmp/void-x86_64-musl.tar.xz -C "$mountpoint"
+            ;;
+        alpine)
+            # Alpine minirootfs
+            wget -q -O /tmp/alpine-minirootfs.tar.gz \
+                "https://dl-cdn.alpinelinux.org/alpine/latest-stable/releases/x86_64/latest-minimal/alpine-minirootfs-latest-x86_64.tar.gz"
+            tar -xzf /tmp/alpine-minirootfs.tar.gz -C "$mountpoint"
+            ;;
+        *)
+            log_error "Unsupported distribution: $distro"
+            return 1
+            ;;
+    esac
+    
+    log_info "Distribution installed to $mountpoint"
+    log_info "You can now chroot and configure: idxm os chroot $device"
+}
+
+os_grub() {
+    local device="$1"
+    local action="$2"
+    
+    if [  -z "$device"  ] || [  -z "$action"  ]; then
+        log_error "Device and action required"
+        echo "Usage: idxm os grub <device> <action>"
+        echo ""
+        echo "Actions:"
+        echo "  install  - Install GRUB to device"
+        echo "  update   - Update GRUB configuration"
+        echo "  remove   - Remove GRUB"
+        echo ""
+        return 1
+    fi
+    
+    local mountpoint="/tmp/os_grub"
+    
+    case "$action" in
+        install)
+            log_step "Installing GRUB to $device..."
+            os_chroot "$device" << 'CHROOT_EOF'
+                grub-install /dev/sda
+                update-grub
+CHROOT_EOF
+            ;;
+        update)
+            log_step "Updating GRUB configuration..."
+            os_chroot "$device" << 'CHROOT_EOF'
+                update-grub 2>/dev/null || grub-mkconfig -o /boot/grub/grub.cfg
+CHROOT_EOF
+            ;;
+        remove)
+            log_step "Removing GRUB..."
+            os_chroot "$device" << 'CHROOT_EOF'
+                apt-get remove --purge grub-pc 2>/dev/null || \
+                yum remove grub2 2>/dev/null || true
+CHROOT_EOF
+            ;;
+        *)
+            log_error "Unknown action: $action"
+            return 1
+            ;;
+    esac
+}
+
+#══════════════════════════════════════════════════════════════════════════════
+# System Tools
+#══════════════════════════════════════════════════════════════════════════════
+
+cmd_sys() {
+    local subcmd="${1:-help}"
+    shift 2>/dev/null || true
+    
+    case "$subcmd" in
+        info)
+            sys_info
+            ;;
+        drivers)
+            sys_drivers
+            ;;
+        pci)
+            sys_pci
+            ;;
+        usb)
+            sys_usb
+            ;;
+        storage)
+            sys_storage
+            ;;
+        mount)
+            sys_mount "$@"
+            ;;
+        unmount)
+            sys_unmount "$@"
+            ;;
+        *)
+            sys_help
+            ;;
+    esac
+}
+
+sys_help() {
+    cat << EOF
+System Management Commands:
+
+Usage: idxm sys <command> [options]
+
+Commands:
+    info                            Show system information
+    drivers                         List loaded drivers
+    pci                             List PCI devices
+    usb                             List USB devices
+    storage                         List storage devices
+    mount <device> <mountpoint>     Mount a filesystem
+    unmount <mountpoint>            Unmount a filesystem
+
+EOF
+}
+
+sys_info() {
+    echo -e "\n${CYAN}System Information${NC}"
+    echo "═══════════════════════════════════════════════════════════════"
+    
+    echo -e "\n${WHITE}Hostname:${NC} $(hostname)"
+    echo -e "${WHITE}Kernel:${NC} $(uname -r)"
+    echo -e "${WHITE}Architecture:${NC} $(uname -m)"
+    echo -e "${WHITE}Uptime:${NC} $(uptime -p)"
+    
+    echo -e "\n${WHITE}CPU:${NC}"
+    grep -m1 "model name" /proc/cpuinfo 2>/dev/null | cut -d: -f2 | xargs
+    
+    echo -e "\n${WHITE}Memory:${NC}"
+    free -h
+    
+    echo -e "\n${WHITE}Storage:${NC}"
+    df -h 2>/dev/null | head -20
+}
+
+sys_drivers() {
+    echo -e "\n${CYAN}Loaded Drivers${NC}"
+    echo "═══════════════════════════════════════════════════════════════"
+    lsmod 2>/dev/null
+}
+
+sys_pci() {
+    echo -e "\n${CYAN}PCI Devices${NC}"
+    echo "═══════════════════════════════════════════════════════════════"
+    lspci 2>/dev/null || ls /sys/bus/pci/devices/ 2>/dev/null
+}
+
+sys_usb() {
+    echo -e "\n${CYAN}USB Devices${NC}"
+    echo "═══════════════════════════════════════════════════════════════"
+    lsusb 2>/dev/null || ls /sys/bus/usb/devices/ 2>/dev/null
+}
+
+sys_storage() {
+    echo -e "\n${CYAN}Storage Devices${NC}"
+    echo "═══════════════════════════════════════════════════════════════"
+    lsblk -f -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINT,MODEL 2>/dev/null
+    
+    echo -e "\n${WHITE}All Block Devices:${NC}"
+    ls -la /dev/sd* /dev/nvme* 2>/dev/null || true
+}
+
+sys_mount() {
+    local device="$1"
+    local mountpoint="${2:-/mnt}"
+    
+    if [  -z "$device"  ]; then
+        log_error "Device required"
+        return 1
+    fi
+    
+    mkdir -p "$mountpoint"
+    mount "$device" "$mountpoint"
+    
+    if [  $? -eq 0  ]; then
+        log_info "Mounted $device at $mountpoint"
+    else
+        log_error "Failed to mount $device"
+        return 1
+    fi
+}
+
+sys_unmount() {
+    local mountpoint="${1:-/mnt}"
+    
+    umount "$mountpoint"
+    
+    if [  $? -eq 0  ]; then
+        log_info "Unmounted $mountpoint"
+    else
+        log_error "Failed to unmount $mountpoint"
+        return 1
+    fi
+}
+
+#══════════════════════════════════════════════════════════════════════════════
+# Main
+#══════════════════════════════════════════════════════════════════════════════
+
+usage() {
+    cat << EOF
+${CYAN}idxmodify v${VERSION} - Firmware & Disk Manipulation OS${NC}
+
+Usage: idxm <command> [subcommand] [options]
+
+Commands:
+    firmware    Firmware management (extract, flash, verify, backup)
+    disk        Disk management (list, info, partition, clone, wipe)
+    os          OS modification (mount, chroot, customize, install)
+    sys         System information (info, drivers, pci, usb, storage)
+
+Options:
+    -f, --force                 Force operation (skip confirmations)
+    -n, --dry-run               Show what would be done without doing it
+    -v, --verbose               Verbose output
+    -s, --safe                  Safe mode (read-only operations only)
+    -h, --help                  Show this help message
+    -V, --version               Show version
+
+Examples:
+    idxm firmware extract /dev/sda bios.bin
+    idxm disk list
+    idxm os chroot /dev/sda2
+    idxm sys info
+
+EOF
+}
+
+main() {
+    # Parse global options
+    while [  $# -gt 0  ]; do
+        case "$1" in
+            -f|--force)
+                FORCE=1
+                shift
+                ;;
+            -n|--dry-run)
+                DRY_RUN=1
+                shift
+                ;;
+            -v|--verbose)
+                VERBOSE=1
+                shift
+                ;;
+            -s|--safe)
+                SAFE_MODE=1
+                shift
+                ;;
+            -h|--help)
+                show_banner
+                usage
+                exit 0
+                ;;
+            -V|--version)
+                echo "${NAME} v${VERSION}"
+                exit 0
+                ;;
+            firmware|disk|os|sys)
+                break
+                ;;
+            *)
+                show_banner
+                log_error "Unknown command: $1"
+                usage
+                exit 1
+                ;;
+        esac
+    done
+    
+    # Check for root (for most operations)
+    if [  ${EUID:-0} -ne 0  ] && [  "$1" != "sys"  ] && [  "$1" != "help"  ]; then
+        log_warn "Some operations require root privileges"
+    fi
+    
+    # Dispatch command
+    local cmd="$1"
+    shift 2>/dev/null || true
+    
+    case "$cmd" in
+        firmware)
+            show_banner
+            cmd_firmware "$@"
+            ;;
+        disk)
+            show_banner
+            cmd_disk "$@"
+            ;;
+        os)
+            show_banner
+            cmd_os "$@"
+            ;;
+        sys)
+            cmd_sys "$@"
+            ;;
+        help|--help|-h)
+            show_banner
+            usage
+            ;;
+        *)
+            show_banner
+            usage
+            ;;
+    esac
+}
+
+main "$@"

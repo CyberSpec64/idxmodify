@@ -1,0 +1,176 @@
+#!/bin/sh
+#==============================================================================
+# idxmodify - Help System
+#==============================================================================
+
+CYAN='\033[0;36m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+WHITE='\033[1;37m'
+NC='\033[0m'
+
+show_help() {
+    cat << EOF
+
+${CYAN}╔═══════════════════════════════════════════════════════════════╗${NC}
+${CYAN}║              idxmodify - Help Documentation                  ║${NC}
+${CYAN}╚═══════════════════════════════════════════════════════════════╝${NC}
+
+${WHITE}OVERVIEW${NC}
+    idxmodify is a Unix-based operating system designed for:
+    • Firmware extraction, modification, and flashing
+    • SATA disk manipulation and partitioning
+    • Linux distribution customization and modification
+    • System recovery and forensics
+
+${WHITE}MAIN COMMANDS${NC}
+
+    ${GREEN}idxm firmware${NC}    Firmware management tools
+    ${GREEN}idxm disk${NC}       Disk management and manipulation
+    ${GREEN}idxm os${NC}         OS modification and customization
+    ${GREEN}idxm sys${NC}        System information and diagnostics
+
+${WHITE}FIRMWARE COMMANDS${NC}
+
+    idxm firmware extract <device> [output]
+        Extract firmware from a device (BIOS, NIC, etc.)
+
+    idxm firmware flash <device> <firmware>
+        Flash firmware to a device (DANGEROUS - requires confirmation)
+
+    idxm firmware verify <device> <firmware>
+        Verify firmware integrity against device
+
+    idxm firmware backup <device> [output]
+        Create backup of current firmware
+
+    idxm firmware info <device>
+        Display firmware information for a device
+
+${WHITE}DISK COMMANDS${NC}
+
+    idxm disk list
+        List all available disks and partitions
+
+    idxm disk info <device>
+        Show detailed disk information
+
+    idxm disk partition <device>
+        Interactive partitioning tool
+
+    idxm disk format <device> <fstype> [label]
+        Format a disk (ext4, fat32, ntfs, btrfs, xfs)
+
+    idxm disk clone <source> <destination>
+        Clone disk (forensic copy with verification)
+
+    idxm disk wipe <device> [passes]
+        Securely wipe disk data
+
+${WHITE}OS COMMANDS${NC}
+
+    idxm os mount <device> [mountpoint]
+        Mount an OS partition
+
+    idxm os unmount <mountpoint>
+        Unmount an OS partition
+
+    idxm os chroot <device>
+        Chroot into an installed OS
+
+    idxm os list
+        List mounted OS partitions
+
+    idxm os modify <device> <action>
+        Modify OS (fix-boot, fix-grub, reset-pass, enable-root)
+
+    idxm os customize <device>
+        Interactive OS customization menu
+
+    idxm os install <device> <distro>
+        Install a Linux distribution
+        (debian, ubuntu, arch, fedora, void, alpine)
+
+    idxm os grub <device> <action>
+        GRUB bootloader management (install, update, remove)
+
+${WHITE}SYSTEM COMMANDS${NC}
+
+    idxm sys info
+        Show system information
+
+    idxm sys drivers
+        List loaded kernel drivers
+
+    idxm sys pci
+        List PCI devices
+
+    idxm sys usb
+        List USB devices
+
+    idxm sys storage
+        List storage devices
+
+    idxm sys mount <device> <mountpoint>
+        Mount a filesystem
+
+    idxm sys unmount <mountpoint>
+        Unmount a filesystem
+
+${WHITE}ADDITIONAL TOOLS${NC}
+
+    idxm-tui              Launch interactive menu system
+    idxm-firmware-extract Advanced firmware extraction
+    idxm-disk-image       Forensic disk imaging
+    idxm-grub             GRUB bootloader manager
+    idxm-sysinfo          System information display
+
+${WHITE}OPTIONS${NC}
+
+    -f, --force           Force operation (skip confirmations)
+    -n, --dry-run         Show what would be done without doing it
+    -v, --verbose         Verbose output
+    -s, --safe            Safe mode (read-only operations only)
+    -h, --help            Show help message
+    -V, --version         Show version information
+
+${WHITE}SAFETY FEATURES${NC}
+
+    • Read-only by default in safe mode
+    • Confirmation prompts for destructive operations
+    • Automatic backups before firmware flashing
+    • Checksum verification for all operations
+    • Dry-run mode to preview changes
+
+${WHITE}EXAMPLES${NC}
+
+    # List all disks
+    idxm disk list
+
+    # Extract firmware from BIOS
+    idxm firmware extract /dev/sda bios_backup.bin
+
+    # Clone a disk
+    idxm disk clone /dev/sda /dev/sdb
+
+    # Fix GRUB on an installed system
+    idxm os modify /dev/sda2 fix-grub
+
+    # Chroot into installed OS
+    idxm os chroot /dev/sda2
+
+    # Interactive menu
+    idxm-tui
+
+${WHITE}TIPS${NC}
+
+    • Always run as root for full functionality
+    • Use -s (safe mode) to prevent accidental modifications
+    • Use -n (dry-run) to preview operations before executing
+    • Check idxm disk list before operations to identify devices
+    • Back up important data before destructive operations
+
+EOF
+}
+
+show_help

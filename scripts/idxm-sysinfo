@@ -1,0 +1,138 @@
+#!/bin/sh
+#==============================================================================
+# idxmodify - System Information Display
+#==============================================================================
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+MAGENTA='\033[0;35m'
+WHITE='\033[1;37m'
+NC='\033[0m'
+
+show_system_info() {
+    echo -e "${CYAN}╔═══════════════════════════════════════════════════════════════╗${NC}"
+    echo -e "${CYAN}║                    SYSTEM INFORMATION                        ║${NC}"
+    echo -e "${CYAN}╚═══════════════════════════════════════════════════════════════╝${NC}"
+    echo ""
+    
+    # System
+    echo -e "${WHITE}System:${NC}"
+    echo -e "  Hostname:    $(hostname 2>/dev/null || echo 'N/A')"
+    echo -e "  Kernel:      $(uname -r)"
+    echo -e "  Arch:        $(uname -m)"
+    echo -e "  OS:          $(cat /etc/os-release 2>/dev/null | grep PRETTY_NAME | cut -d'"' -f2 || uname -s)"
+    echo -e "  Uptime:      $(uptime -p 2>/dev/null || uptime)"
+    echo ""
+    
+    # CPU
+    echo -e "${WHITE}CPU:${NC}"
+    grep -m1 "model name" /proc/cpuinfo 2>/dev/null | cut -d: -f2 | xargs -I{} echo "  Model:       {}"
+    grep -m1 "cpu MHz" /proc/cpuinfo 2>/dev/null | cut -d: -f2 | xargs -I{} echo "  Speed:       {} MHz"
+    echo -e "  Cores:       $(nproc 2>/dev/null || echo 'N/A')"
+    echo ""
+    
+    # Memory
+    echo -e "${WHITE}Memory:${NC}"
+    free -h 2>/dev/null | awk '/Mem:/{print "  Total:       " $2 "\n  Used:        " $3 "\n  Free:        " $4}'
+    echo ""
+    
+    # Swap
+    echo -e "${WHITE}Swap:${NC}"
+    free -h 2>/dev/null | awk '/Swap:/{print "  Total:       " $2 "\n  Used:        " $3 "\n  Free:        " $4}'
+    echo ""
+    
+    # Storage
+    echo -e "${WHITE}Storage:${NC}"
+    lsblk -d -o NAME,SIZE,TYPE,MODEL 2>/dev/null | head -20
+    echo ""
+    
+    # Filesystem
+    echo -e "${WHITE}Filesystems:${NC}"
+    df -hT 2>/dev/null | grep -v tmpfs | head -15
+    echo ""
+    
+    # Network
+    echo -e "${WHITE}Network:${NC}"
+    for iface in $(ls /sys/class/net/ 2>/dev/null | grep -v lo); do
+        local ip=$(ip -4 addr show "$iface" 2>/dev/null | grep inet | awk '{print $2}' | head -1)
+        local mac=$(cat /sys/class/net/"$iface"/address 2>/dev/null)
+        echo -e "  $iface: $ip ($mac)"
+    done
+    echo ""
+    
+    # PCI
+    echo -e "${WHITE}PCI Devices:${NC}"
+    lspci 2>/dev/null | head -15 || echo "  lspci not available"
+    echo ""
+    
+    # USB
+    echo -e "${WHITE}USB Devices:${NC}"
+    lsusb 2>/dev/null | head -10 || echo "  lsusb not available"
+    echo ""
+    
+    # Drivers
+    echo -e "${WHITE}Loaded Drivers:${NC}"
+    lsmod 2>/dev/null | head -15 || echo "  lsmod not available"
+    echo ""
+}
+
+show_storage_info() {
+    echo -e "${CYAN}═══════════════════════════════════════════════════════════════${NC}"
+    echo -e "${CYAN}                    STORAGE DEVICES                           ${NC}"
+    echo -e "${CYAN}═══════════════════════════════════════════════════════════════${NC}"
+    echo ""
+    
+    lsblk -f -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINT,UUID,MODEL 2>/dev/null
+    
+    echo ""
+    echo -e "${WHITE}Block Devices:${NC}"
+    ls -la /dev/sd* /dev/nvme* 2>/dev/null | head -20
+    echo ""
+    
+    echo -e "${WHITE}Disk Space Usage:${NC}"
+    df -h 2>/dev/null | grep -E "^/dev"
+    echo ""
+}
+
+show_driver_info() {
+    echo -e "${CYAN}═══════════════════════════════════════════════════════════════${NC}"
+    echo -e "${CYAN}                    LOADED DRIVERS                           ${NC}"
+    echo -e "${CYAN}═══════════════════════════════════════════════════════════════${NC}"
+    echo ""
+    
+    echo -e "${WHITE}Storage Drivers:${NC}"
+    lsmod 2>/dev/null | grep -E "^(sd_|sr_|scsi_|ata_|ahci|nvme|usb.storage)" || echo "  None"
+    echo ""
+    
+    echo -e "${WHITE}Network Drivers:${NC}"
+    lsmod 2>/dev/null | grep -E "^(e1000|r8169|iwl|ath|rtl)" || echo "  None"
+    echo ""
+    
+    echo -e "${WHITE}Graphics Drivers:${NC}"
+    lsmod 2>/dev/null | grep -E "^(drm|i915|amdgpu|nouveau)" || echo "  None"
+    echo ""
+    
+    echo -e "${WHITE}All Modules:${NC}"
+    lsmod 2>/dev/null | wc -l
+    echo " modules loaded"
+    echo ""
+}
+
+# Main
+case "${1:-full}" in
+    full)
+        show_system_info
+        ;;
+    storage)
+        show_storage_info
+        ;;
+    drivers)
+        show_driver_info
+        ;;
+    *)
+        echo "Usage: idxm-sysinfo [full|storage|drivers]"
+        ;;
+esac
